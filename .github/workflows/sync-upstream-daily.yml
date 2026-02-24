@@ -17,16 +17,45 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve upstream repository
+        id: upstream
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const override = process.env.UPSTREAM_REPO?.trim();
+            if (override) {
+              core.info(`Using UPSTREAM_REPO override: ${override}`);
+              core.setOutput('repo', override);
+              return;
+            }
+
+            const { data: repo } = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const parent = repo.parent?.full_name;
+            if (!parent) {
+              core.setFailed(
+                'Unable to detect upstream repository automatically. ' +
+                  'Please set repository variable UPSTREAM_REPO (e.g. owner/repo).'
+              );
+              return;
+            }
+
+            core.info(`Detected upstream repository from fork parent: ${parent}`);
+            core.setOutput('repo', parent);
+        env:
+          UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO }}
+
       - name: Configure git user
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Add upstream remote
-        env:
-          UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'sgl-project/sglang' }}
         run: |
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git remote add upstream "https://github.com/${{ steps.upstream.outputs.repo }}.git"
           git fetch upstream
 
       - name: Sync target branch
