@@ -1,0 +1,38 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Daily at 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        env:
+          UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'sgl-project/sglang' }}
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream
+
+      - name: Sync target branch
+        env:
+          TARGET_BRANCH: ${{ vars.SYNC_TARGET_BRANCH || 'main' }}
+        run: |
+          git checkout "${TARGET_BRANCH}"
+          git merge --ff-only "upstream/${TARGET_BRANCH}" || git merge --no-edit "upstream/${TARGET_BRANCH}"
+          git push origin "${TARGET_BRANCH}"
