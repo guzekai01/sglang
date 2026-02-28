@@ -388,8 +388,8 @@ class Scheduler(
         # Init profiler
         self.init_profiler()
 
-        # Init Perfetto trace
-        self.init_perfetto_trace()
+        # Perfetto collector starts as None; created on demand via PERFETTO activity
+        self.perfetto_collector = None
 
         # Init prefill-decodedisaggregation
         self.init_disaggregation()
