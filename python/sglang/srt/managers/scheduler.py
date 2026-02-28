@@ -174,6 +174,7 @@ from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
+from sglang.srt.observability.perfetto_trace_mixin import SchedulerPerfettoTraceMixin
 from sglang.srt.observability.req_time_stats import (
     real_time,
     set_schedule_time_batch,
@@ -251,6 +252,7 @@ class Scheduler(
     SchedulerUpdateWeightsMixin,
     SchedulerProfilerMixin,
     SchedulerMetricsMixin,
+    SchedulerPerfettoTraceMixin,
     SchedulerDisaggregationDecodeMixin,
     SchedulerDisaggregationPrefillMixin,
     SchedulerMultiplexMixin,
@@ -385,6 +387,9 @@ class Scheduler(
 
         # Init profiler
         self.init_profiler()
+
+        # Init Perfetto trace
+        self.init_perfetto_trace()
 
         # Init prefill-decodedisaggregation
         self.init_disaggregation()
@@ -1115,23 +1120,34 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             # Receive requests
+            self.perfetto_on_recv_requests_begin()
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            self.perfetto_on_recv_requests_end(len(recv_reqs))
             if self._engine_paused:
                 continue
 
             # Get the next batch to run
+            self.perfetto_on_get_batch_begin()
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            self.perfetto_on_get_batch_end(batch)
 
             # Launch the current batch
             if batch:
+                self.perfetto_on_run_batch_begin(batch)
                 result = self.run_batch(batch)
+                self.perfetto_on_run_batch_end(batch)
+                self.perfetto_on_process_result_begin(batch)
                 self.process_batch_result(batch, result)
+                self.perfetto_on_process_result_end(batch)
             else:
                 # When the server is idle, do self-check and re-init some states.
                 # Skip if there are any streaming sessions (latency sensitive).
                 self.self_check_during_idle()
+
+            # Emit counters
+            self.perfetto_counters()
 
             # Update last_batch
             self.last_batch = batch
@@ -1146,20 +1162,25 @@ class Scheduler(
         ] = deque()
 
         def pop_and_process():
-            # Process the results of the last batch
             tmp_batch, tmp_result = self.result_queue.popleft()
+            self.perfetto_on_process_result_begin(tmp_batch)
             self.process_batch_result(tmp_batch, tmp_result)
+            self.perfetto_on_process_result_end(tmp_batch)
 
         while True:
             # Receive requests
+            self.perfetto_on_recv_requests_begin()
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            self.perfetto_on_recv_requests_end(len(recv_reqs))
             if self._engine_paused:
                 continue
 
             # Get the next batch to run
+            self.perfetto_on_get_batch_begin()
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            self.perfetto_on_get_batch_end(batch)
             disable_overlap_for_batch = self.is_disable_overlap_for_batch(batch)
 
             # If we do not need to overlap the current batch with the last batch,
@@ -1169,7 +1190,9 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                self.perfetto_on_run_batch_begin(batch)
                 batch_result = self.run_batch(batch)
+                self.perfetto_on_run_batch_end(batch)
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None
@@ -1181,6 +1204,9 @@ class Scheduler(
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
+
+            # Emit counters
+            self.perfetto_counters()
 
             # Run sample of the current batch
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
@@ -1698,6 +1724,8 @@ class Scheduler(
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
+            if not is_retracted:
+                self.perfetto_on_req_queue(req)
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
@@ -2159,6 +2187,8 @@ class Scheduler(
         self.running_bs = len(self.running_batch.reqs)
 
         set_time_batch(can_run_list, "set_forward_entry_time")
+        for req in can_run_list:
+            self.perfetto_on_req_prefill_begin(req)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(

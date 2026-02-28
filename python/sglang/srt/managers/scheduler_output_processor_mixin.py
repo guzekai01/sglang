@@ -165,6 +165,7 @@ class SchedulerOutputProcessorMixin:
 
                 if req.is_chunked <= 0:
                     req.time_stats.set_prefill_finished_time()
+                    self.perfetto_on_req_prefill_end(req)
 
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
@@ -174,6 +175,10 @@ class SchedulerOutputProcessorMixin:
                         self.maybe_collect_routed_experts(req)
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
+                        self.perfetto_on_req_finish(
+                            req,
+                            str(req.finished_reason) if req.finished_reason else "",
+                        )
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         self.tree_cache.cache_unfinished_req(req)
 
@@ -448,6 +453,7 @@ class SchedulerOutputProcessorMixin:
             self._mamba_prefix_cache_update(req, batch, result, i)
 
             req.time_stats.set_last_decode_finish_time()
+            self.perfetto_on_req_decode_step(req, req.time_stats.decode_ct)
 
             req.check_finished(new_accepted_len)
 
@@ -462,13 +468,16 @@ class SchedulerOutputProcessorMixin:
                 self.maybe_collect_routed_experts(req)
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
-                    # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
                         release_kv_cache(req, self.tree_cache)
                 else:
                     release_kv_cache(req, self.tree_cache)
 
                 req.time_stats.set_completion_time()
+                self.perfetto_on_req_finish(
+                    req,
+                    str(req.finished_reason) if req.finished_reason else "",
+                )
 
             self.maybe_collect_customized_info(i, req, logits_output)
 

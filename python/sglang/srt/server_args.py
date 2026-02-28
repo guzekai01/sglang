@@ -397,6 +397,10 @@ class ServerArgs:
     enable_trace: bool = False
     otlp_traces_endpoint: str = "localhost:4317"
 
+    # Perfetto trace (lightweight, no OpenTelemetry dependency)
+    enable_perfetto_trace: bool = False
+    perfetto_trace_dir: Optional[str] = None
+
     # RequestMetricsExporter configuration
     export_metrics_to_file: bool = False
     export_metrics_to_file_dir: Optional[str] = None
@@ -3633,6 +3637,18 @@ class ServerArgs:
             type=str,
             default="localhost:4317",
             help="Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
+        )
+        parser.add_argument(
+            "--enable-perfetto-trace",
+            action="store_true",
+            help="Enable lightweight Perfetto tracing (req-level and batch-level). "
+            "No OpenTelemetry dependency. Dumps Chrome Trace Event Format JSON.",
+        )
+        parser.add_argument(
+            "--perfetto-trace-dir",
+            type=str,
+            default=None,
+            help="Directory for Perfetto trace output files. Default: /tmp/sglang_perfetto_traces",
         )
 
         # RequestMetricsExporter configuration
