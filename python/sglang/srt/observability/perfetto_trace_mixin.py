@@ -84,6 +84,10 @@ class SchedulerPerfettoTraceMixin:
         path = os.path.join(self._perfetto_trace_dir, filename)
         return self.perfetto_collector.dump(path)
 
+    def dump_perfetto_trace(self: "Scheduler") -> Optional[str]:
+        """Public method callable via RPC to dump the current trace."""
+        return self._dump_perfetto_trace()
+
     # =================== Scheduler loop tracing ===================
 
     def perfetto_on_recv_requests_begin(self: "Scheduler"):
