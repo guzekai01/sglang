@@ -57,7 +57,7 @@ class GPUStatsMonitor:
     """Periodically samples GPU metrics via NVML in a daemon thread.
 
     Produces Chrome-trace counter ("C") events that are merged into the
-    final Perfetto trace.
+    final Perfetto trace after ``stop()`` is called.
     """
 
     DEFAULT_INTERVAL_MS = 100
@@ -91,8 +91,6 @@ class GPUStatsMonitor:
                     pass
                 self._nvml_ok = False
 
-    # -- lifecycle --
-
     def start(self) -> None:
         if not self._available or self._running:
             return
@@ -110,13 +108,14 @@ class GPUStatsMonitor:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+            self._thread = None
 
     def take_events(self) -> List[Dict]:
+        """Return collected events. Must be called after ``stop()``."""
+        assert not self._running, "call stop() before take_events()"
         events = self._events
         self._events = []
         return events
-
-    # -- internals --
 
     def _loop(self) -> None:
         import torch
@@ -134,27 +133,20 @@ class GPUStatsMonitor:
                 torch_alloc = float(torch.cuda.memory_allocated(self._gpu_id))
                 torch_reserved = float(torch.cuda.memory_reserved(self._gpu_id))
 
-                args = {
-                    "mem_total_gib": round(mem.total / BYTES_TO_GIB, 2),
-                    "mem_free_gib": round(mem.free / BYTES_TO_GIB, 2),
-                    "mem_used_gib": round(mem.used / BYTES_TO_GIB, 2),
-                    "torch_alloc_gib": round(torch_alloc / BYTES_TO_GIB, 2),
-                    "torch_reserved_gib": round(torch_reserved / BYTES_TO_GIB, 2),
-                    "gpu_util_pct": util.gpu,
-                    "mem_util_pct": util.memory,
-                    "temperature_c": temp,
-                }
-                self._events.append(
-                    {
-                        "name": "gpu_stats",
-                        "cat": "gpu_stats",
-                        "ph": "C",
-                        "ts": _ts_us(),
-                        "pid": self._pid,
-                        "tid": "gpu_stats",
-                        "args": args,
-                    }
-                )
+                self._events.append({
+                    "name": "gpu_stats", "cat": "gpu_stats", "ph": "C",
+                    "ts": _ts_us(), "pid": self._pid, "tid": "gpu_stats",
+                    "args": {
+                        "mem_total_gib": round(mem.total / BYTES_TO_GIB, 2),
+                        "mem_free_gib": round(mem.free / BYTES_TO_GIB, 2),
+                        "mem_used_gib": round(mem.used / BYTES_TO_GIB, 2),
+                        "torch_alloc_gib": round(torch_alloc / BYTES_TO_GIB, 2),
+                        "torch_reserved_gib": round(torch_reserved / BYTES_TO_GIB, 2),
+                        "gpu_util_pct": util.gpu,
+                        "mem_util_pct": util.memory,
+                        "temperature_c": temp,
+                    },
+                })
             except Exception as exc:
                 logger.debug("GPUStatsMonitor sample error: %s", exc)
 
@@ -188,11 +180,14 @@ class _Tid:
 class PerfettoTraceCollector:
     """Collects Chrome Trace Event Format events and exports to JSON.
 
+    All public methods are called from the scheduler's single-threaded
+    event loop — no locking required.
+
     Lifecycle:
         1. Construct with rank info and output path.
         2. ``start()`` – begin recording events (and GPU monitor).
         3. Events flow in from the scheduler mixin hooks.
-        4. ``stop()``  – stop recording and flush to disk.
+        4. ``stop()``  – stop GPU monitor, merge, flush to disk.
     """
 
     def __init__(
@@ -214,20 +209,16 @@ class PerfettoTraceCollector:
         self.pp_size = pp_size
         self.dp_size = dp_size
         self._output_path = output_path
-        self.max_req_tracks = max_req_tracks
+        self._max_req_tracks = max_req_tracks
 
         self.pid = dp_rank * 10000 + pp_rank * 100 + tp_rank
 
         self._enabled = False
         self._events: List[Dict[str, Any]] = []
-        self._lock = threading.Lock()
 
-        # req-tid pool
         self._rid_to_tid: Dict[str, int] = {}
         self._next_req_tid = _Tid.REQ_BASE
-        self._req_tid_pool: List[int] = []
 
-        # GPU monitor
         self._gpu_monitor: Optional[GPUStatsMonitor] = None
         if gpu_id is not None:
             self._gpu_monitor = GPUStatsMonitor(gpu_id, self.pid)
@@ -245,9 +236,7 @@ class PerfettoTraceCollector:
         self._enabled = False
         if self._gpu_monitor is not None:
             self._gpu_monitor.stop()
-            gpu_events = self._gpu_monitor.take_events()
-            with self._lock:
-                self._events.extend(gpu_events)
+            self._events.extend(self._gpu_monitor.take_events())
         return self._dump()
 
     @property
@@ -263,11 +252,11 @@ class PerfettoTraceCollector:
         if self.dp_size > 1:
             label += f"-DP{self.dp_rank}"
 
-        self._emit(
+        self._events.append(
             {"name": "process_name", "ph": "M", "pid": self.pid, "tid": 0,
              "args": {"name": f"Rank [{label}]"}}
         )
-        self._emit(
+        self._events.append(
             {"name": "process_sort_index", "ph": "M", "pid": self.pid, "tid": 0,
              "args": {"sort_index": self.pid}}
         )
@@ -275,58 +264,64 @@ class PerfettoTraceCollector:
             (_Tid.SCHEDULER, "Scheduler"),
             (_Tid.BATCH_FORWARD, "Batch Forward"),
         ]:
-            self._emit(
+            self._events.append(
                 {"name": "thread_name", "ph": "M", "pid": self.pid, "tid": tid,
                  "args": {"name": name}}
             )
 
-    def _emit(self, ev: Dict[str, Any]) -> None:
-        with self._lock:
-            self._events.append(ev)
-
     def _get_req_tid(self, rid: str) -> int:
-        if rid in self._rid_to_tid:
-            return self._rid_to_tid[rid]
-        tid = (
-            self._req_tid_pool.pop()
-            if self._req_tid_pool
-            else self._alloc_req_tid()
-        )
+        tid = self._rid_to_tid.get(rid)
+        if tid is not None:
+            return tid
+        tid = self._alloc_req_tid()
         self._rid_to_tid[rid] = tid
         short = rid.split("_")[-1][:12]
-        self._emit(
+        self._events.append(
             {"name": "thread_name", "ph": "M", "pid": self.pid, "tid": tid,
              "args": {"name": f"Req {short}"}}
         )
         return tid
 
     def _alloc_req_tid(self) -> int:
-        tid = self._next_req_tid
-        self._next_req_tid += 1
-        if self._next_req_tid >= _Tid.REQ_BASE + self.max_req_tracks:
-            self._next_req_tid = _Tid.REQ_BASE
-        return tid
+        # Find an unused tid, avoiding collisions with in-use tids
+        used_tids = set(self._rid_to_tid.values())
+        for _ in range(self._max_req_tracks):
+            tid = self._next_req_tid
+            self._next_req_tid = (
+                _Tid.REQ_BASE
+                if self._next_req_tid + 1 >= _Tid.REQ_BASE + self._max_req_tracks
+                else self._next_req_tid + 1
+            )
+            if tid not in used_tids:
+                return tid
+        return self._next_req_tid
 
     def _release_req_tid(self, rid: str) -> None:
-        if rid in self._rid_to_tid:
-            self._req_tid_pool.append(self._rid_to_tid.pop(rid))
+        self._rid_to_tid.pop(rid, None)
+
+    def has_req(self, rid: str) -> bool:
+        return rid in self._rid_to_tid
 
     # =================== scheduler events ===================
 
     def sched_begin(self, name: str) -> None:
         if not self._enabled:
             return
-        self._emit({"name": name, "cat": "scheduler", "ph": "B",
-                     "ts": _ts_us(), "pid": self.pid, "tid": _Tid.SCHEDULER})
+        self._events.append(
+            {"name": name, "cat": "scheduler", "ph": "B",
+             "ts": _ts_us(), "pid": self.pid, "tid": _Tid.SCHEDULER}
+        )
 
     def sched_end(self, name: str, args: Dict = None) -> None:
         if not self._enabled:
             return
-        ev: Dict[str, Any] = {"name": name, "cat": "scheduler", "ph": "E",
-                               "ts": _ts_us(), "pid": self.pid, "tid": _Tid.SCHEDULER}
+        ev: Dict[str, Any] = {
+            "name": name, "cat": "scheduler", "ph": "E",
+            "ts": _ts_us(), "pid": self.pid, "tid": _Tid.SCHEDULER,
+        }
         if args:
             ev["args"] = args
-        self._emit(ev)
+        self._events.append(ev)
 
     # =================== batch events ===================
 
@@ -334,54 +329,62 @@ class PerfettoTraceCollector:
                     extra: Dict = None) -> None:
         if not self._enabled:
             return
-        a: Dict[str, Any] = {"forward_mode": mode, "batch_size": bs,
-                              "num_tokens": ntokens}
+        a: Dict[str, Any] = {
+            "forward_mode": mode, "batch_size": bs, "num_tokens": ntokens,
+        }
         if extra:
             a.update(extra)
-        self._emit({"name": f"batch_{mode}", "cat": "batch", "ph": "B",
-                     "ts": _ts_us(), "pid": self.pid, "tid": _Tid.BATCH_FORWARD,
-                     "args": a})
+        self._events.append(
+            {"name": f"batch_{mode}", "cat": "batch", "ph": "B",
+             "ts": _ts_us(), "pid": self.pid, "tid": _Tid.BATCH_FORWARD,
+             "args": a}
+        )
 
     def batch_end(self, mode: str, args: Dict = None) -> None:
         if not self._enabled:
             return
-        ev: Dict[str, Any] = {"name": f"batch_{mode}", "cat": "batch", "ph": "E",
-                               "ts": _ts_us(), "pid": self.pid, "tid": _Tid.BATCH_FORWARD}
+        ev: Dict[str, Any] = {
+            "name": f"batch_{mode}", "cat": "batch", "ph": "E",
+            "ts": _ts_us(), "pid": self.pid, "tid": _Tid.BATCH_FORWARD,
+        }
         if args:
             ev["args"] = args
-        self._emit(ev)
+        self._events.append(ev)
 
     # =================== request events ===================
 
     def req_begin(self, rid: str, name: str, args: Dict = None) -> None:
         if not self._enabled:
             return
-        tid = self._get_req_tid(rid)
-        ev: Dict[str, Any] = {"name": name, "cat": "request", "ph": "B",
-                               "ts": _ts_us(), "pid": self.pid, "tid": tid}
+        ev: Dict[str, Any] = {
+            "name": name, "cat": "request", "ph": "B",
+            "ts": _ts_us(), "pid": self.pid, "tid": self._get_req_tid(rid),
+        }
         if args:
             ev["args"] = args
-        self._emit(ev)
+        self._events.append(ev)
 
     def req_end(self, rid: str, name: str, args: Dict = None) -> None:
         if not self._enabled:
             return
-        tid = self._get_req_tid(rid)
-        ev: Dict[str, Any] = {"name": name, "cat": "request", "ph": "E",
-                               "ts": _ts_us(), "pid": self.pid, "tid": tid}
+        ev: Dict[str, Any] = {
+            "name": name, "cat": "request", "ph": "E",
+            "ts": _ts_us(), "pid": self.pid, "tid": self._get_req_tid(rid),
+        }
         if args:
             ev["args"] = args
-        self._emit(ev)
+        self._events.append(ev)
 
     def req_instant(self, rid: str, name: str, args: Dict = None) -> None:
         if not self._enabled:
             return
-        tid = self._get_req_tid(rid)
-        ev: Dict[str, Any] = {"name": name, "cat": "request", "ph": "i", "s": "t",
-                               "ts": _ts_us(), "pid": self.pid, "tid": tid}
+        ev: Dict[str, Any] = {
+            "name": name, "cat": "request", "ph": "i", "s": "t",
+            "ts": _ts_us(), "pid": self.pid, "tid": self._get_req_tid(rid),
+        }
         if args:
             ev["args"] = args
-        self._emit(ev)
+        self._events.append(ev)
 
     def req_finish(self, rid: str) -> None:
         if not self._enabled:
@@ -393,18 +396,18 @@ class PerfettoTraceCollector:
     def counter(self, name: str, values: Dict[str, Any]) -> None:
         if not self._enabled:
             return
-        self._emit({"name": name, "ph": "C", "ts": _ts_us(),
-                     "pid": self.pid, "tid": 0, "args": values})
+        self._events.append(
+            {"name": name, "ph": "C", "ts": _ts_us(),
+             "pid": self.pid, "tid": 0, "args": values}
+        )
 
     # =================== dump ===================
 
     def _dump(self) -> str:
-        with self._lock:
-            events = list(self._events)
-            self._events.clear()
-            self._rid_to_tid.clear()
-            self._req_tid_pool.clear()
-            self._next_req_tid = _Tid.REQ_BASE
+        events = self._events
+        self._events = []
+        self._rid_to_tid.clear()
+        self._next_req_tid = _Tid.REQ_BASE
 
         data = {
             "traceEvents": events,
@@ -424,7 +427,6 @@ class PerfettoTraceCollector:
         else:
             with open(path, "wb") as f:
                 f.write(json_bytes)
-
         logger.info(
             "Perfetto trace: %d events -> %s (TP%d/PP%d/DP%d)",
             len(events), path, self.tp_rank, self.pp_rank, self.dp_rank,
@@ -432,8 +434,7 @@ class PerfettoTraceCollector:
         return path
 
     def event_count(self) -> int:
-        with self._lock:
-            return len(self._events)
+        return len(self._events)
 
 
 # ---------------------------------------------------------------------------

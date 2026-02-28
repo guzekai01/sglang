@@ -245,7 +245,8 @@ class SchedulerMetricsMixin:
         cache_hit_rate = (
             prefill_stats.log_hit_tokens / total_tokens if total_tokens > 0 else 0.0
         )
-        c = getattr(self, "perfetto_collector", None)
+
+        c = self.perfetto_collector
         if c is not None and c.enabled:
             c.counter("prefill_batch", {
                 "new_seq": prefill_stats.num_new_seqs,
@@ -262,12 +263,6 @@ class SchedulerMetricsMixin:
                 prefill_compute_tokens=prefill_stats.log_input_tokens,
                 prefill_cache_tokens=prefill_stats.log_hit_tokens,
                 dp_cooperation_info=dp_cooperation_info,
-            )
-
-            # Basics
-            total_tokens = prefill_stats.log_input_tokens + prefill_stats.log_hit_tokens
-            cache_hit_rate = (
-                prefill_stats.log_hit_tokens / total_tokens if total_tokens > 0 else 0.0
             )
 
             self.stats.num_running_reqs = prefill_stats.running_bs
@@ -430,7 +425,7 @@ class SchedulerMetricsMixin:
 
         logger.info(msg)
 
-        c = getattr(self, "perfetto_collector", None)
+        c = self.perfetto_collector
         if c is not None and c.enabled:
             c.counter("decode_batch", {
                 "running_req": num_running_reqs,
