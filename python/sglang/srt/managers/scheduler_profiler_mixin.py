@@ -114,6 +114,9 @@ class SchedulerProfilerMixin:
         self.profile_id = profile_id
         self.profile_prefix = profile_prefix
 
+        if "PERFETTO" in activities:
+            self.init_perfetto_collector(str(self.torch_profiler_output_dir), profile_id)
+
         if start_step:
             self.profiler_start_forward_ct = max(start_step, self.forward_ct + 1)
 
@@ -210,6 +213,10 @@ class SchedulerProfilerMixin:
         if "CUDA_PROFILER" in activities:
             if self.gpu_id == get_global_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStart()
+            self.profile_in_progress = True
+
+        if "PERFETTO" in activities:
+            self.start_perfetto_profile()
             self.profile_in_progress = True
 
         return ProfileReqOutput(success=True, message="Succeeded")
@@ -320,6 +327,11 @@ class SchedulerProfilerMixin:
         if "CUDA_PROFILER" in self.profiler_activities:
             if self.gpu_id == get_global_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStop()
+
+        if "PERFETTO" in self.profiler_activities:
+            perfetto_path = self.stop_perfetto_profile()
+            if perfetto_path:
+                logger.info("Perfetto trace saved to: %s", perfetto_path)
 
         merge_message = self._merge_profile_traces()
 

@@ -241,17 +241,28 @@ class SchedulerMetricsMixin:
 
         logger.info(msg)
 
+        total_tokens = prefill_stats.log_input_tokens + prefill_stats.log_hit_tokens
+        cache_hit_rate = (
+            prefill_stats.log_hit_tokens / total_tokens if total_tokens > 0 else 0.0
+        )
+
+        c = self.perfetto_collector
+        if c is not None and c.enabled:
+            c.counter("prefill_batch", {
+                "new_seq": prefill_stats.num_new_seqs,
+                "new_token": prefill_stats.log_input_tokens,
+                "cached_token": prefill_stats.log_hit_tokens,
+                "cache_hit_rate": round(cache_hit_rate, 4),
+                "token_usage": round(token_usage, 4),
+                "running_req": prefill_stats.running_bs,
+                "queue_req": len(self.waiting_queue),
+            })
+
         if self.enable_metrics:
             self.metrics_collector.increment_realtime_tokens(
                 prefill_compute_tokens=prefill_stats.log_input_tokens,
                 prefill_cache_tokens=prefill_stats.log_hit_tokens,
                 dp_cooperation_info=dp_cooperation_info,
-            )
-
-            # Basics
-            total_tokens = prefill_stats.log_input_tokens + prefill_stats.log_hit_tokens
-            cache_hit_rate = (
-                prefill_stats.log_hit_tokens / total_tokens if total_tokens > 0 else 0.0
             )
 
             self.stats.num_running_reqs = prefill_stats.running_bs
@@ -413,6 +424,16 @@ class SchedulerMetricsMixin:
         )
 
         logger.info(msg)
+
+        c = self.perfetto_collector
+        if c is not None and c.enabled:
+            c.counter("decode_batch", {
+                "running_req": num_running_reqs,
+                "token_usage": round(token_usage, 4),
+                "queue_req": len(self.waiting_queue),
+                "gen_throughput": round(self.last_gen_throughput, 2),
+            })
+
         if self.enable_metrics:
             # Basics
             self.stats.num_running_reqs = num_running_reqs

@@ -105,12 +105,14 @@ class SchedulerPPMixin:
                     )
                 self._pp_commit_comm_work(self.send_proxy_work)
                 if self.cur_batch:
+                    self.perfetto_on_run_batch_begin(self.cur_batch)
                     result, self.launch_event = self._pp_launch_batch(
                         mb_id,
                         pp_proxy_tensors,
                         self.mb_metadata,
                         self.last_rank_comm_queue,
                     )
+                    self.perfetto_on_run_batch_end(self.cur_batch)
                 if self.server_args.pp_async_batch_depth == 0:
                     next_pp_outputs, next_batch_result, d2h_event = (
                         self._pp_commit_send_output_work_and_preprocess_output_tensors(
@@ -120,11 +122,13 @@ class SchedulerPPMixin:
                     )
                 if self.mbs[next_mb_id] is not None:
                     d2h_event.synchronize()
+                    self.perfetto_on_process_result_begin(self.mbs[next_mb_id])
                     with torch.profiler.record_function("process_batch_result"):
                         self._pp_process_batch_result(
                             self.mbs[next_mb_id],
                             next_batch_result,
                         )
+                    self.perfetto_on_process_result_end(self.mbs[next_mb_id])
                     self.last_mbs[next_mb_id] = self.mbs[next_mb_id]
                 if not self.pp_group.is_last_rank:
                     if self.cur_batch:
@@ -138,6 +142,9 @@ class SchedulerPPMixin:
                             )
 
                 self.pp_outputs = next_pp_outputs
+
+            # Emit counters
+            self.perfetto_counters()
 
             # When the server is idle, self-check and re-init some states
             if server_is_idle:

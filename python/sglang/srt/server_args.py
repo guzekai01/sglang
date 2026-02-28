@@ -3634,7 +3634,6 @@ class ServerArgs:
             default="localhost:4317",
             help="Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
         )
-
         # RequestMetricsExporter configuration
         parser.add_argument(
             "--export-metrics-to-file",
