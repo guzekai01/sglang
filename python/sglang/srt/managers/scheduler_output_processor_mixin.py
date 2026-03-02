@@ -441,6 +441,9 @@ class SchedulerOutputProcessorMixin:
                 # And all the over-allocated tokens will be freed in `release_kv_cache`.
                 continue
 
+            if len(req.output_ids) == 1:
+                self.perfetto_on_req_decode_begin(req)
+
             new_accepted_len = 1
             if batch.spec_algorithm.is_none():
                 req.output_ids.append(next_token_id)

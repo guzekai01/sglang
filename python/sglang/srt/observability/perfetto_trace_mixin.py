@@ -173,6 +173,12 @@ class SchedulerPerfettoTraceMixin:
         c = self.perfetto_collector
         if c is not None and c.enabled:
             c.req_end(req.rid, "prefill")
+            c.req_begin(req.rid, "waiting")
+
+    def perfetto_on_req_decode_begin(self: "Scheduler", req: "Req") -> None:
+        c = self.perfetto_collector
+        if c is not None and c.enabled and c.has_req(req.rid):
+            c.req_end(req.rid, "waiting")
             c.req_begin(req.rid, "decode")
 
     def perfetto_on_req_decode_step(
@@ -190,7 +196,10 @@ class SchedulerPerfettoTraceMixin:
     ) -> None:
         c = self.perfetto_collector
         if c is not None and c.enabled:
-            c.req_end(req.rid, "decode", args={"output_len": len(req.output_ids)})
+            if len(req.output_ids) <= 1:
+                c.req_end(req.rid, "waiting")
+            else:
+                c.req_end(req.rid, "decode", args={"output_len": len(req.output_ids)})
             c.req_end(
                 req.rid, "lifecycle",
                 args={

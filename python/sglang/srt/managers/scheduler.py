@@ -2090,6 +2090,7 @@ class Scheduler(
             dllm_config=self.dllm_config,
         )
 
+        _prev_chunked = self.chunked_req
         if self.chunked_req is not None:
             self.chunked_req.init_next_round_input()
             self.chunked_req = adder.add_chunked_req(self.chunked_req)
@@ -2188,8 +2189,7 @@ class Scheduler(
 
         set_time_batch(can_run_list, "set_forward_entry_time")
         for req in can_run_list:
-            # only trace begin when req in the first batch of prefill
-            if len(req.output_ids) == 0:
+            if req is not _prev_chunked:
                 self.perfetto_on_req_prefill_begin(req)
 
         # Create a new batch
