@@ -57,25 +57,6 @@ class SchedulerPerfettoTraceMixin:
             tp_size=self.tp_size, pp_size=self.pp_size, dp_size=self.dp_size,
             gpu_id=self.gpu_id,
         )
-        # Request-span book-keeping used to avoid emitting unbalanced begin/end
-        # events in cases like chunked prefill where the same hook can fire
-        # multiple times per request.
-        self._perfetto_req_queue_wait_open: set[str] = set()
-        self._perfetto_req_prefill_open: set[str] = set()
-        self._perfetto_req_decode_open: set[str] = set()
-
-    def _perfetto_req_state(self: "Scheduler") -> tuple[set[str], set[str], set[str]]:
-        qw = getattr(self, "_perfetto_req_queue_wait_open", None)
-        pf = getattr(self, "_perfetto_req_prefill_open", None)
-        dc = getattr(self, "_perfetto_req_decode_open", None)
-        if qw is None or pf is None or dc is None:
-            qw = set()
-            pf = set()
-            dc = set()
-            self._perfetto_req_queue_wait_open = qw
-            self._perfetto_req_prefill_open = pf
-            self._perfetto_req_decode_open = dc
-        return qw, pf, dc
 
     def start_perfetto_profile(self: "Scheduler") -> None:
         if self.perfetto_collector is not None:
@@ -162,27 +143,30 @@ class SchedulerPerfettoTraceMixin:
     def perfetto_on_req_queue(self: "Scheduler", req: "Req") -> None:
         c = self.perfetto_collector
         if c is not None and c.enabled:
-            qw_open, pf_open, dc_open = self._perfetto_req_state()
             c.req_begin(
                 req.rid, "lifecycle",
                 args={"rid": req.rid[:16], "input_len": len(req.origin_input_ids)},
             )
             c.req_begin(req.rid, "queue_wait")
-            qw_open.add(req.rid)
-            pf_open.discard(req.rid)
-            dc_open.discard(req.rid)
 
     def perfetto_on_req_prefill_begin(self: "Scheduler", req: "Req") -> None:
         c = self.perfetto_collector
         if c is not None and c.enabled:
-            qw_open, pf_open, _ = self._perfetto_req_state()
+            seen = c.has_req(req.rid)
+            last_chunk_ts = getattr(
+                getattr(req, "time_stats", None),
+                "last_chunked_prefill_finish_time",
+                0.0,
+            )
 
-            # Chunked prefill can schedule the same request multiple times. We
-            # only open the prefill span once (first chunk), and emit lightweight
-            # per-chunk markers for subsequent chunks.
-            if req.rid in pf_open:
+            # Minimal dedupe for chunked prefill: for a request that we've
+            # already traced, if it has finished at least one chunk before, this
+            # begin-hook corresponds to a subsequent chunk. Do not emit another
+            # prefill begin (nor queue_wait end), just add an instant marker.
+            if seen and last_chunk_ts > 0:
                 c.req_instant(
-                    req.rid, "prefill_chunk",
+                    req.rid,
+                    "prefill_chunk",
                     args={
                         "extend_input_len": req.extend_input_len,
                         "cached_tokens": req.cached_tokens,
@@ -190,10 +174,8 @@ class SchedulerPerfettoTraceMixin:
                 )
                 return
 
-            if c.has_req(req.rid):
-                if req.rid in qw_open:
-                    c.req_end(req.rid, "queue_wait")
-                    qw_open.discard(req.rid)
+            if seen:
+                c.req_end(req.rid, "queue_wait")
             else:
                 # First time seeing this request (profiling started after it
                 # was already queued) — open a lifecycle span now.
@@ -208,18 +190,12 @@ class SchedulerPerfettoTraceMixin:
                     "cached_tokens": req.cached_tokens,
                 },
             )
-            pf_open.add(req.rid)
 
     def perfetto_on_req_prefill_end(self: "Scheduler", req: "Req") -> None:
         c = self.perfetto_collector
         if c is not None and c.enabled:
-            _, pf_open, dc_open = self._perfetto_req_state()
-            if req.rid in pf_open:
-                c.req_end(req.rid, "prefill")
-                pf_open.discard(req.rid)
-            if req.rid not in dc_open:
-                c.req_begin(req.rid, "decode")
-                dc_open.add(req.rid)
+            c.req_end(req.rid, "prefill")
+            c.req_begin(req.rid, "decode")
 
     def perfetto_on_req_decode_step(
         self: "Scheduler", req: "Req", decode_ct: int,
@@ -236,17 +212,7 @@ class SchedulerPerfettoTraceMixin:
     ) -> None:
         c = self.perfetto_collector
         if c is not None and c.enabled:
-            qw_open, pf_open, dc_open = self._perfetto_req_state()
-
-            if req.rid in pf_open:
-                c.req_end(req.rid, "prefill")
-                pf_open.discard(req.rid)
-            if req.rid in qw_open:
-                c.req_end(req.rid, "queue_wait")
-                qw_open.discard(req.rid)
-            if req.rid in dc_open:
-                c.req_end(req.rid, "decode", args={"output_len": len(req.output_ids)})
-                dc_open.discard(req.rid)
+            c.req_end(req.rid, "decode", args={"output_len": len(req.output_ids)})
             c.req_end(
                 req.rid, "lifecycle",
                 args={

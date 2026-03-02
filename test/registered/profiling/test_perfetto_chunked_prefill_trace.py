@@ -19,12 +19,19 @@ register_cuda_ci(est_time=5, suite="stage-b-test-small-1-gpu")
 
 
 @dataclass
+class _DummyTimeStats:
+    # Used by perfetto trace mixin to dedupe chunked prefill begins.
+    last_chunked_prefill_finish_time: float = 0.0
+
+
+@dataclass
 class _DummyReq:
     rid: str
     origin_input_ids: List[int]
     extend_input_len: int = 0
     cached_tokens: int = 0
     output_ids: List[int] = field(default_factory=list)
+    time_stats: _DummyTimeStats = field(default_factory=_DummyTimeStats)
 
 
 class _DummyScheduler(SchedulerPerfettoTraceMixin):
@@ -53,6 +60,9 @@ class TestPerfettoChunkedPrefillTrace(_BaseTestCase):
             sched.perfetto_on_req_prefill_begin(req)
 
             # Subsequent prefill chunks must NOT open another prefill span.
+            # In the real scheduler, this timestamp is set after each chunk's
+            # forward completes (i.e., before the next chunk begins).
+            req.time_stats.last_chunked_prefill_finish_time = 1.0
             req.extend_input_len = 16
             req.cached_tokens = 8
             sched.perfetto_on_req_prefill_begin(req)
