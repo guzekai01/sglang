@@ -2188,7 +2188,9 @@ class Scheduler(
 
         set_time_batch(can_run_list, "set_forward_entry_time")
         for req in can_run_list:
-            self.perfetto_on_req_prefill_begin(req)
+            # only trace begin when req in the first batch of prefill
+            if len(req.output_ids) == 0:
+                self.perfetto_on_req_prefill_begin(req)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
