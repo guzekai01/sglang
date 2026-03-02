@@ -49,6 +49,38 @@ def _ts_us() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Global collector access  (one per scheduler process)
+# ---------------------------------------------------------------------------
+
+_collector: Optional["PerfettoTraceCollector"] = None
+
+
+def set_perfetto_collector(c: Optional["PerfettoTraceCollector"]) -> None:
+    global _collector
+    _collector = c
+
+
+def get_perfetto_collector() -> Optional["PerfettoTraceCollector"]:
+    return _collector
+
+
+# Thin helpers for callsites outside the scheduler (e.g. ModelRunner, mm_utils).
+# Each does a single global-variable check, so the disabled-path cost is minimal.
+
+def perfetto_batch_begin(mode: str, bs: int, ntokens: int = 0,
+                         extra: Dict = None) -> None:
+    c = _collector
+    if c is not None and c.enabled:
+        c.batch_begin(mode, bs, ntokens, extra)
+
+
+def perfetto_batch_end(mode: str, args: Dict = None) -> None:
+    c = _collector
+    if c is not None and c.enabled:
+        c.batch_end(mode, args)
+
+
+# ---------------------------------------------------------------------------
 # GPU stats background monitor
 # ---------------------------------------------------------------------------
 
@@ -169,6 +201,8 @@ class GPUStatsMonitor:
 class _Tid:
     SCHEDULER = 0
     BATCH_FORWARD = 1
+    MODEL_FORWARD = 2
+    MM_EMBED = 3
     REQ_BASE = 100
 
 
@@ -262,7 +296,9 @@ class PerfettoTraceCollector:
         )
         for tid, name in [
             (_Tid.SCHEDULER, "Scheduler"),
-            (_Tid.BATCH_FORWARD, "Batch Forward"),
+            (_Tid.BATCH_FORWARD, "Batch (scheduler)"),
+            (_Tid.MODEL_FORWARD, "Model Forward"),
+            (_Tid.MM_EMBED, "MM Embed"),
         ]:
             self._events.append(
                 {"name": "thread_name", "ph": "M", "pid": self.pid, "tid": tid,
@@ -346,6 +382,60 @@ class PerfettoTraceCollector:
         ev: Dict[str, Any] = {
             "name": f"batch_{mode}", "cat": "batch", "ph": "E",
             "ts": _ts_us(), "pid": self.pid, "tid": _Tid.BATCH_FORWARD,
+        }
+        if args:
+            ev["args"] = args
+        self._events.append(ev)
+
+    # =================== model forward events (GPU-accurate) =========
+
+    def model_forward_begin(self, mode: str, bs: int, ntokens: int = 0,
+                            extra: Dict = None) -> None:
+        if not self._enabled:
+            return
+        a: Dict[str, Any] = {
+            "forward_mode": mode, "batch_size": bs, "num_tokens": ntokens,
+        }
+        if extra:
+            a.update(extra)
+        self._events.append(
+            {"name": f"forward_{mode}", "cat": "model", "ph": "B",
+             "ts": _ts_us(), "pid": self.pid, "tid": _Tid.MODEL_FORWARD,
+             "args": a}
+        )
+
+    def model_forward_end(self, mode: str, args: Dict = None) -> None:
+        if not self._enabled:
+            return
+        ev: Dict[str, Any] = {
+            "name": f"forward_{mode}", "cat": "model", "ph": "E",
+            "ts": _ts_us(), "pid": self.pid, "tid": _Tid.MODEL_FORWARD,
+        }
+        if args:
+            ev["args"] = args
+        self._events.append(ev)
+
+    # =================== multimodal embed events ===================
+
+    def mm_embed_begin(self, modality: str = "", num_items: int = 0,
+                       extra: Dict = None) -> None:
+        if not self._enabled:
+            return
+        a: Dict[str, Any] = {"modality": modality, "num_items": num_items}
+        if extra:
+            a.update(extra)
+        self._events.append(
+            {"name": "mm_embed", "cat": "multimodal", "ph": "B",
+             "ts": _ts_us(), "pid": self.pid, "tid": _Tid.MM_EMBED,
+             "args": a}
+        )
+
+    def mm_embed_end(self, args: Dict = None) -> None:
+        if not self._enabled:
+            return
+        ev: Dict[str, Any] = {
+            "name": "mm_embed", "cat": "multimodal", "ph": "E",
+            "ts": _ts_us(), "pid": self.pid, "tid": _Tid.MM_EMBED,
         }
         if args:
             ev["args"] = args

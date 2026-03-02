@@ -574,7 +574,19 @@ def _get_chunked_prefill_embedding(
         embedding_items_hash = MultiModalStaticCache.combine_hashes(item_hashes)
         embedding_per_req = embedding_cache.get(item_hashes)
         if embedding_per_req is None:
+            from sglang.srt.observability.perfetto_trace import get_perfetto_collector
+
+            _pt = get_perfetto_collector()
+            if _pt is not None and _pt.enabled:
+                _pt.mm_embed_begin(
+                    modality=embedding_items_per_req[0].modality.name
+                    if embedding_items_per_req
+                    else "",
+                    num_items=len(embedding_items_per_req),
+                )
             embedding = data_embedding_func(embedding_items_per_req)
+            if _pt is not None and _pt.enabled:
+                _pt.mm_embed_end()
             embedding_per_req = (
                 EmbeddingResult(embedding=embedding)
                 if isinstance(embedding, torch.Tensor)
@@ -783,8 +795,19 @@ def _get_chunked_prefill_embedding_for_chunked_items(
 
         embedding_per_chunk = embedding_cache.get(embedding_items_hash)
         if embedding_per_chunk is None:
-            # ViT forward for items related with per chunk
+            from sglang.srt.observability.perfetto_trace import get_perfetto_collector
+
+            _pt = get_perfetto_collector()
+            if _pt is not None and _pt.enabled:
+                _pt.mm_embed_begin(
+                    modality=embedding_items_per_chunk[0].modality.name
+                    if embedding_items_per_chunk
+                    else "",
+                    num_items=len(embedding_items_per_chunk),
+                )
             embedding_per_chunk = data_embedding_func(embedding_items_per_chunk)
+            if _pt is not None and _pt.enabled:
+                _pt.mm_embed_end()
 
             embedding_for_cache = embedding_per_chunk.detach().cpu()
             if not embedding_cache.set(embedding_items_hash, embedding_for_cache):

@@ -23,7 +23,10 @@ import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
-from sglang.srt.observability.perfetto_trace import PerfettoTraceCollector
+from sglang.srt.observability.perfetto_trace import (
+    PerfettoTraceCollector,
+    set_perfetto_collector,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -61,10 +64,12 @@ class SchedulerPerfettoTraceMixin:
     def start_perfetto_profile(self: "Scheduler") -> None:
         if self.perfetto_collector is not None:
             self.perfetto_collector.start()
+            set_perfetto_collector(self.perfetto_collector)
 
     def stop_perfetto_profile(self: "Scheduler") -> Optional[str]:
         c = self.perfetto_collector
         if c is not None and c.enabled:
+            set_perfetto_collector(None)
             path = c.stop()
             self.perfetto_collector = None
             return path

@@ -2409,6 +2409,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     ) -> ModelRunnerOutput:
         self.forward_pass_id += 1
 
+        from sglang.srt.observability.perfetto_trace import get_perfetto_collector
+
+        _pt = get_perfetto_collector()
+        if _pt is not None and _pt.enabled:
+            mode = forward_batch.forward_mode.name.lower()
+            _pt.model_forward_begin(
+                mode, forward_batch.batch_size,
+                forward_batch.extend_num_tokens or 0,
+            )
+
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
             forward_batch,
@@ -2452,6 +2462,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end()
+
+        if _pt is not None and _pt.enabled:
+            _pt.model_forward_end(mode, args={"can_run_graph": output.can_run_graph})
 
         if dumper.may_enable:
             dumper.step()
