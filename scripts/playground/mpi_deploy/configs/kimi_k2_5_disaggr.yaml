@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# Disaggregated deployment config for Kimi-K2.5.
+# Prefill and decode nodes are separated; a mini load-balancer is started
+# automatically to route traffic between them.
+#
+# Usage:
+#   python3 deploy.py configs/kimi_k2_5_disaggr.yaml
+# ---------------------------------------------------------------------------
+
+deploy:
+  type: disaggregated
+  hostfile: /home/shared/pinyi/scripts/mpi_test/hosts
+  gpu_num: 8
+  prefill_nnode: 1
+  decode_nnode: 1
+
+# ---- Prefill nodes ---------------------------------------------------------
+
+prefill_env:
+  NCCL_SOCKET_IFNAME: bond0
+  NCCL_IB_DISABLE: 0
+  NCCL_DEBUG: INFO
+  NCCL_IB_GID_INDEX: 3
+  NCCL_NET_PLUGIN: none
+  NCCL_IB_ECE_ENABLE: 0
+  NCCL_IB_TIMEOUT: 22
+  MC_TE_METRIC: True
+  MC_ENABLE_DEST_DEVICE_AFFINITY: True
+  GLOO_SOCKET_IFNAME: bond0
+
+prefill_args:
+  model_path: /home/shared/pinyi/models/kimi-K2.5/
+  host: "0.0.0.0"
+  port: 30000
+  tp_size: 8
+  dist_init_addr: "0.0.0.0:23456"
+  trust_remote_code: true
+  mem_fraction_static: 0.92
+  chunked_prefill_size: 16384
+  disaggregation_mode: prefill
+  mm_attention_backend: fa3
+  attention_backend: fa3
+  model_loader_extra_config:
+    enable_multithread_load: true
+    num_threads: 16
+
+# ---- Decode nodes ----------------------------------------------------------
+
+decode_env:
+  NCCL_SOCKET_IFNAME: bond0
+  NCCL_IB_DISABLE: 0
+  NCCL_DEBUG: INFO
+  NCCL_IB_GID_INDEX: 3
+  NCCL_NET_PLUGIN: none
+  NCCL_IB_ECE_ENABLE: 0
+  NCCL_IB_TIMEOUT: 22
+  MC_TE_METRIC: True
+  MC_ENABLE_DEST_DEVICE_AFFINITY: True
+  GLOO_SOCKET_IFNAME: bond0
+
+decode_args:
+  model_path: /home/shared/pinyi/models/kimi-K2.5/
+  host: "0.0.0.0"
+  port: 30000
+  tp_size: 8
+  dist_init_addr: "0.0.0.0:23457"
+  trust_remote_code: true
+  mem_fraction_static: 0.92
+  max_running_requests: 64
+  disaggregation_mode: decode
+  mm_attention_backend: fa3
+  attention_backend: fa3
+  model_loader_extra_config:
+    enable_multithread_load: true
+    num_threads: 16
