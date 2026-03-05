@@ -679,8 +679,14 @@ class FusedMoE(torch.nn.Module):
         if method.__class__.__name__ == "KTEPWrapperMethod":
             method = method.gpu_method
 
+        # Checkpoint stores CompressedTensors WNA16 packed weights transposed relative to what
+        # the layer expects. We only transpose here (a free metadata-only view operation); the
+        # .contiguous() copy is intentionally deferred until _load_w13/_load_w2 where the tensor
+        # has already been narrowed to the TP shard (1/tp_size of the full weight). Doing
+        # .contiguous() on the full tensor before TP sharding wastes tp_size-fold CPU memory
+        # bandwidth and causes tp_size-fold more mmap page-faults on every expert weight load.
         loaded_weight = (
-            loaded_weight.t().contiguous()
+            loaded_weight.t()
             if (
                 method.__class__.__name__
                 in [
@@ -899,8 +905,10 @@ class FusedMoE(torch.nn.Module):
         method = self.quant_method
         if hasattr(self, "scheme"):
             method = self.scheme
+        # Same deferred-contiguous optimization as in _weight_loader_impl: only transpose
+        # (cheap metadata view), defer .contiguous() to after TP sharding in _load_w13/_load_w2.
         loaded_weight = (
-            loaded_weight.t().contiguous()
+            loaded_weight.t()
             if (
                 method.__class__.__name__
                 in [
