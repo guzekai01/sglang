@@ -34,7 +34,7 @@ from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
-from sglang.srt.layers.utils import PPMissingLayer
+from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -700,6 +700,19 @@ class KimiLinearForCausalLM(nn.Module):
             kwargs = args[2] if len(args) > 2 else {}
             if "rotary_emb.inv_freq" in name:
                 continue
+            layer_id = get_layer_id(name)
+
+            if layer_id is not None and (
+                layer_id < self.model.start_layer or layer_id >= self.model.end_layer
+            ):
+                continue
+
+            if not self.pp_group.is_first_rank and name == "model.embed_tokens.weight":
+                continue
+            if not self.pp_group.is_last_rank and (
+                name == "model.norm.weight" or name.startswith("lm_head.")
+            ):
+                continue
 
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
@@ -718,7 +731,7 @@ class KimiLinearForCausalLM(nn.Module):
                     continue
                 # Check if this mapping targets a fused projection (only apply fusion check to fused params)
                 if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj"}:
-                    layer_id = int(name.split(".")[2])
+                    assert layer_id is not None
                     if not self.config.is_kda_layer(layer_id):
                         continue
                     layer = self.model.layers[layer_id].self_attn
@@ -726,7 +739,7 @@ class KimiLinearForCausalLM(nn.Module):
                     if not getattr(layer, "do_fuse_qkvbfg", False):
                         continue
                 if weight_name in {".q_proj", ".k_proj", ".v_proj"}:
-                    layer_id = int(name.split(".")[2])
+                    assert layer_id is not None
                     if not self.config.is_kda_layer(layer_id):
                         continue
                 name = name.replace(weight_name, param_name)
@@ -781,6 +794,8 @@ class KimiLinearForCausalLM(nn.Module):
             loaded_params.add(name)
 
         for layer_id in self.config.full_attention_layer_ids:
+            if layer_id < self.model.start_layer or layer_id >= self.model.end_layer:
+                continue
             self_attn = self.model.layers[layer_id].self_attn
             w_kc, w_vc = self_attn.kv_b_proj.weight.unflatten(
                 0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
