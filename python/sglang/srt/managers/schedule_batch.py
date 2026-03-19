@@ -1782,6 +1782,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )
         self.extend_lens.extend([1] * running_bs)
         self.extend_num_tokens += running_bs
+        self.extend_start_loc = compute_start_loc_from_lens(
+            self.extend_start_loc.new_tensor(self.extend_lens)
+        )
         # TODO (lianmin): Revisit this. It should be seq_len - 1
         self.extend_logprob_start_lens.extend([0] * running_bs)
         self.is_prefill_only = False

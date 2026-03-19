@@ -54,6 +54,7 @@ from sglang.srt.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
@@ -799,6 +800,11 @@ class Qwen3_5ForCausalLM(nn.Module):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+            layer_id = get_layer_id(name)
+            if layer_id is not None and (
+                layer_id < self.start_layer or layer_id >= self.end_layer
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -920,6 +926,11 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+            layer_id = get_layer_id(name)
+            if layer_id is not None and (
+                layer_id < self.start_layer or layer_id >= self.end_layer
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
@@ -1079,6 +1090,16 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+            layer_id = get_layer_id(name)
+            if (
+                "visual" not in name
+                and layer_id is not None
+                and (
+                    layer_id < self.model.start_layer
+                    or layer_id >= self.model.end_layer
+                )
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -1222,6 +1243,16 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+            layer_id = get_layer_id(name)
+            if (
+                "visual" not in name
+                and layer_id is not None
+                and (
+                    layer_id < self.model.start_layer
+                    or layer_id >= self.model.end_layer
+                )
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if name.endswith("experts.gate_up_proj") or name.endswith(

@@ -1039,7 +1039,11 @@ def compute_position_triton(
     batch_size = extend_seq_lens.shape[0]
     has_prefix = extend_prefix_lens.shape[0] == batch_size
 
-    if extend_start_loc is None:
+    if (
+        extend_start_loc is None
+        or extend_start_loc.shape[0] != batch_size
+        or extend_start_loc.device != extend_seq_lens.device
+    ):
         extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
 
     positions = torch.empty(
@@ -1097,7 +1101,11 @@ def compute_position_torch(
         ],
         axis=0,
     )
-    if extend_start_loc is None:
+    if (
+        extend_start_loc is None
+        or extend_start_loc.shape[0] != extend_seq_lens.shape[0]
+        or extend_start_loc.device != extend_seq_lens.device
+    ):
         extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
     return positions.to(torch.int64), extend_start_loc
 

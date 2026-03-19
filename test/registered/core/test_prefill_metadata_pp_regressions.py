@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 import sglang.srt.models.qwen3_5 as qwen3_5_model
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors, compute_position
 from sglang.srt.utils.common import compute_start_loc_from_lens
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
@@ -33,7 +34,71 @@ class _FakeLayer(nn.Module):
         return hidden_states + self.delta, residual
 
 
+class _FakeSamplingInfo:
+    def merge_batch(self, other):
+        del other
+
+
+class _FakeReq:
+    def __init__(self, origin_input_ids, output_ids):
+        self.origin_input_ids = origin_input_ids
+        self.output_ids = output_ids
+        self.fill_ids = origin_input_ids + output_ids
+        self.extend_input_len = len(output_ids)
+
+    def set_extend_input_len(self, extend_input_len):
+        self.extend_input_len = extend_input_len
+
+
 class TestPrefillMetadataAndPPRegressions(CustomTestCase):
+    def test_mix_with_running_recomputes_extend_start_loc(self):
+        prefill_batch = ScheduleBatch(
+            reqs=[_FakeReq([1, 2], [3, 4, 5])],
+            model_config=types.SimpleNamespace(is_encoder_decoder=False),
+            sampling_info=_FakeSamplingInfo(),
+            input_ids=torch.tensor([3, 4, 5], dtype=torch.int64),
+            req_pool_indices=torch.tensor([0], dtype=torch.int64),
+            seq_lens=torch.tensor([5], dtype=torch.int64),
+            seq_lens_cpu=torch.tensor([5], dtype=torch.int64),
+            out_cache_loc=torch.tensor([10, 11, 12], dtype=torch.int64),
+            orig_seq_lens=torch.tensor([5], dtype=torch.int32),
+            seq_lens_sum=5,
+            prefix_lens=[2],
+            extend_lens=[3],
+            extend_num_tokens=3,
+            extend_start_loc=torch.tensor([0], dtype=torch.int32),
+            extend_logprob_start_lens=[0],
+            enable_overlap=False,
+            return_logprob=False,
+        )
+        running_batch = ScheduleBatch(
+            reqs=[_FakeReq([9, 8, 7, 6, 5], [4])],
+            model_config=types.SimpleNamespace(is_encoder_decoder=False),
+            sampling_info=_FakeSamplingInfo(),
+            input_ids=torch.tensor([4], dtype=torch.int64),
+            req_pool_indices=torch.tensor([1], dtype=torch.int64),
+            seq_lens=torch.tensor([6], dtype=torch.int64),
+            seq_lens_cpu=torch.tensor([6], dtype=torch.int64),
+            out_cache_loc=torch.tensor([20], dtype=torch.int64),
+            orig_seq_lens=torch.tensor([6], dtype=torch.int32),
+            seq_lens_sum=6,
+            prefix_lens=[],
+            extend_lens=[],
+            extend_num_tokens=1,
+            extend_start_loc=torch.tensor([0], dtype=torch.int32),
+            extend_logprob_start_lens=[],
+            enable_overlap=False,
+            return_logprob=False,
+        )
+
+        prefill_batch.mix_with_running(running_batch)
+
+        self.assertEqual(prefill_batch.extend_lens, [3, 1])
+        torch.testing.assert_close(
+            prefill_batch.extend_start_loc,
+            torch.tensor([0, 3], dtype=torch.int32),
+        )
+
     def test_compute_position_reuses_precomputed_start_loc(self):
         extend_seq_lens = torch.tensor([4, 2, 5], dtype=torch.int32)
         extend_prefix_lens = torch.tensor([1, 0, 3], dtype=torch.int32)
