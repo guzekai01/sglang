@@ -11,6 +11,7 @@ For more usage examples and recipes, visit the `SGLang Cookbook <https://cookboo
    glm45.md
    glmv.md
    gpt_oss.md
+   kimi_prefill_optimization.md
    minimax_m2.md
    qwen3.md
    qwen3_5.md
