@@ -3364,6 +3364,14 @@ def ceil_align(x: int, y: int) -> int:
     return ceil_div(x, y) * y
 
 
+def compute_start_loc_from_lens(seq_lens: torch.Tensor) -> torch.Tensor:
+    """Convert per-sequence lengths to exclusive start offsets."""
+    start_loc = torch.zeros_like(seq_lens)
+    if seq_lens.numel() > 1:
+        start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+    return start_loc
+
+
 # COPIED FROM DeepGEMM
 def ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y

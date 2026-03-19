@@ -12,7 +12,7 @@ from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, ReqToTokenPoo
 from sglang.srt.mem_cache.swa_memory_pool import SWATokenToKVPoolAllocator
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import support_triton
-from sglang.srt.utils.common import ceil_align
+from sglang.srt.utils.common import ceil_align, compute_start_loc_from_lens
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -31,7 +31,7 @@ def write_req_to_token_pool_triton(
     prefix_tensors,
     pre_lens,
     seq_lens,
-    extend_lens,
+    extend_start_loc,
     out_cache_loc,
     req_to_token_ptr_stride: tl.constexpr,
 ):
@@ -55,10 +55,7 @@ def write_req_to_token_pool_triton(
             mask=mask,
         )
 
-    # NOTE: This can be slow for large bs
-    cumsum_start = tl.cast(0, tl.int64)
-    for i in range(pid):
-        cumsum_start += tl.load(extend_lens + i)
+    cumsum_start = tl.load(extend_start_loc + pid).to(tl.int64)
 
     num_loop = tl.cdiv(seq_len - pre_len, BLOCK_SIZE)
     for i in range(num_loop):
@@ -85,6 +82,7 @@ def write_cache_indices(
     seq_lens_cpu: torch.Tensor,
     extend_lens_tensor: torch.Tensor,
     extend_lens_cpu: torch.Tensor,
+    extend_start_loc: torch.Tensor,
     prefix_tensors: list[torch.Tensor],
     req_to_token_pool: ReqToTokenPool,
 ):
@@ -101,17 +99,18 @@ def write_cache_indices(
             prefix_pointers,
             prefix_lens_tensor,
             seq_lens_tensor,
-            extend_lens_tensor,
+            extend_start_loc,
             out_cache_loc,
             req_to_token_pool.req_to_token.shape[1],
         )
     else:
-        pt = 0
+        extend_start_loc_cpu = compute_start_loc_from_lens(extend_lens_cpu)
         for i in range(req_pool_indices_cpu.shape[0]):
             req_idx = req_pool_indices_cpu[i].item()
             prefix_len = prefix_lens_cpu[i].item()
             seq_len = seq_lens_cpu[i].item()
             extend_len = extend_lens_cpu[i].item()
+            pt = extend_start_loc_cpu[i].item()
 
             req_to_token_pool.write(
                 (req_idx, slice(0, prefix_len)),
@@ -384,6 +383,7 @@ def alloc_for_extend(
         batch.seq_lens_cpu,
         extend_lens_device,
         extend_lens_cpu,
+        batch.extend_start_loc,
         prefix_tensors,
         batch.req_to_token_pool,
     )

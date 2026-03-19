@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.utils.common import ceil_align, is_pin_memory_available
+from sglang.srt.utils.common import (
+    ceil_align,
+    compute_start_loc_from_lens,
+    is_pin_memory_available,
+)
 
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1244,6 +1248,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     prefix_lens: List[int] = None
     extend_lens: List[int] = None
     extend_num_tokens: Optional[int] = None
+    extend_start_loc: torch.Tensor = None  # shape: [b], int32
     decoding_reqs: List[Req] = None
     extend_logprob_start_lens: List[int] = None
     # It comes empty list if logprob is not required.
@@ -1474,6 +1479,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens = seq_lens_tensor
         self.seq_lens_cpu = seq_lens_cpu
         self.extend_num_tokens = extend_num_tokens
+        self.extend_start_loc = compute_start_loc_from_lens(
+            torch.tensor(extend_lens, dtype=torch.int32, pin_memory=_pin).to(
+                self.device, non_blocking=True
+            )
+        )
 
         # Allocate memory
         out_cache_loc, req_pool_indices_tensor, req_pool_indices = alloc_for_extend(
@@ -2201,6 +2211,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_num_tokens=self.extend_num_tokens,
             extend_seq_lens=extend_seq_lens,
             extend_prefix_lens=extend_prefix_lens,
+            extend_start_loc=self.extend_start_loc,
             extend_logprob_start_lens=extend_logprob_start_lens,
             multimodal_inputs=self.multimodal_inputs,
             encoder_cached=self.encoder_cached,
@@ -2368,6 +2379,7 @@ class ModelWorkerBatch:
     extend_num_tokens: Optional[int]
     extend_seq_lens: Optional[List[int]]
     extend_prefix_lens: Optional[List[int]]
+    extend_start_loc: Optional[torch.Tensor]
     extend_logprob_start_lens: Optional[List[int]]
     extend_input_logprob_token_ids: Optional[torch.Tensor]
 
