@@ -57,7 +57,7 @@ from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_compiler_backend, is_hip, is_npu, support_triton
-from sglang.srt.utils.common import ceil_align
+from sglang.srt.utils.common import ceil_align, compute_start_loc_from_lens
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
@@ -549,6 +549,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 ret.extend_prefix_lens,
                 ret.extend_seq_lens,
                 ret.extend_num_tokens,
+                batch.extend_start_loc,
             )
             if ret.positions is None:
                 ret.positions = positions
@@ -1088,32 +1089,41 @@ def compute_position(
     extend_prefix_lens: torch.Tensor,
     extend_seq_lens: torch.Tensor,
     extend_seq_lens_sum: int,
+    extend_start_loc: Optional[torch.Tensor] = None,
 ):
     if support_triton(attn_backend):
         positions, extend_start_loc = compute_position_triton(
             extend_prefix_lens,
             extend_seq_lens,
             extend_seq_lens_sum,
+            extend_start_loc,
         )
     else:
         positions, extend_start_loc = compute_position_torch(
-            extend_prefix_lens, extend_seq_lens
+            extend_prefix_lens, extend_seq_lens, extend_start_loc
         )
     return positions, extend_start_loc
 
 
 def compute_position_triton(
-    extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor, extend_seq_lens_sum
+    extend_prefix_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_seq_lens_sum,
+    extend_start_loc: Optional[torch.Tensor] = None,
 ):
     """Compute positions. It is a fused version of `compute_position_torch`."""
     batch_size = extend_seq_lens.shape[0]
     has_prefix = extend_prefix_lens.shape[0] == batch_size
 
+    if (
+        extend_start_loc is None
+        or extend_start_loc.shape[0] != batch_size
+        or extend_start_loc.device != extend_seq_lens.device
+    ):
+        extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
+
     positions = torch.empty(
         extend_seq_lens_sum, dtype=torch.int64, device=extend_seq_lens.device
-    )
-    extend_start_loc = torch.empty(
-        batch_size, dtype=torch.int32, device=extend_seq_lens.device
     )
 
     # Launch kernel
@@ -1142,10 +1152,7 @@ def compute_position_kernel(
     prefix_len = tl.load(extend_prefix_lens + pid) if has_prefix else 0
     seq_len = tl.load(extend_seq_lens + pid)
 
-    # NOTE: This can be slow for large bs
-    cumsum_start = tl.cast(0, tl.int64)
-    for i in range(pid):
-        cumsum_start += tl.load(extend_seq_lens + i)
+    cumsum_start = tl.load(extend_start_loc + pid).to(tl.int64)
 
     num_loop = tl.cdiv(seq_len, BLOCK_SIZE)
     for i in range(num_loop):
@@ -1155,11 +1162,12 @@ def compute_position_kernel(
             prefix_len + offset,
             mask=offset < seq_len,
         )
-    tl.store(extend_start_loc + pid, cumsum_start)
 
 
 def compute_position_torch(
-    extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor
+    extend_prefix_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_start_loc: Optional[torch.Tensor] = None,
 ):
     positions = torch.cat(
         [
@@ -1170,8 +1178,12 @@ def compute_position_torch(
         ],
         axis=0,
     )
-    extend_start_loc = torch.zeros_like(extend_seq_lens)
-    extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
+    if (
+        extend_start_loc is None
+        or extend_start_loc.shape[0] != extend_seq_lens.shape[0]
+        or extend_start_loc.device != extend_seq_lens.device
+    ):
+        extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
     return positions.to(torch.int64), extend_start_loc
 
 
