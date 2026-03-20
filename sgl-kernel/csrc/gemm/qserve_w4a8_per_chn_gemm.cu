@@ -681,9 +681,8 @@ void qserve_w4a8_per_chn_gemm(
   if (sm_version >= 90) {
     // SM90 (Hopper / H20) optimized configurations:
     // - More pipeline stages to leverage 228KB shared memory and hide memory latency
-    // - Tile sizes tuned for H20's 78 SMs and 4.0 TB/s HBM3 bandwidth
-    // - H20 is memory-bandwidth-rich relative to compute, so deeper pipelines
-    //   are critical for keeping tensor cores fed
+    // - H20 is memory-bandwidth-rich (4.0 TB/s HBM3) relative to compute (78 SMs),
+    //   so deeper pipelines are critical for keeping tensor cores fed
     constexpr int G = 128;
 
     if (num_out_feats > 256) {
@@ -695,7 +694,7 @@ void qserve_w4a8_per_chn_gemm(
       constexpr int WARP_K = 64;
       constexpr int STAGES = 5;
       KERNEL_LAUNCH_CODE
-    } else if (num_out_feats >= 64) {
+    } else if (num_out_feats >= 128) {
       constexpr int CTA_M = 64;
       constexpr int CTA_N = 64;
       constexpr int CTA_K = 64;
@@ -705,6 +704,8 @@ void qserve_w4a8_per_chn_gemm(
       constexpr int STAGES = 8;
       KERNEL_LAUNCH_CODE
     } else {
+      // Decode: CTA_M=32 generates more blocks for better SM utilization on H20's
+      // 78 SMs; doubled pipeline depth vs SM80 for superior memory latency hiding
       constexpr int CTA_M = 32;
       constexpr int CTA_N = 64;
       constexpr int CTA_K = 128;
