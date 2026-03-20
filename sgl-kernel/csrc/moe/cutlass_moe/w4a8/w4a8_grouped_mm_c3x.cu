@@ -85,6 +85,15 @@ inline void invoke_gemm(
       chunk_size)
 #define INVOKE_GEMM_WITH_CONFIG(Config) INVOKE_GEMM_WITH_CONFIG_HELPER Config
 
+// Query SM count to detect H20-class GPUs (78 SMs) vs H100 (132 SMs)
+static int get_sm_count() {
+  static int sm_count = -1;
+  if (sm_count < 0) {
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0);
+  }
+  return sm_count;
+}
+
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -103,21 +112,42 @@ void dispatch_w4a8_moe_mm_sm90(
   uint32_t const n = d_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
 
+  // H20 has 78 SMs: prefer cluster(1,1,1) for small problems to avoid
+  // under-utilization, and use cooperative schedule more aggressively
+  // since H20's high bandwidth benefits from cooperative data movement
+  const bool is_h20 = (get_sm_count() <= 80);
+
   if (n == 4096 && k == 7168) {
     // group gemm 1
     if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
+      if (is_h20) {
+        // H20: cluster(1,1,1) avoids wasting SMs on small problems
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
+      }
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
+      }
     } else if (m <= 256) {
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      if (is_h20) {
+        // H20: smaller cluster to ensure full SM utilization with 78 SMs
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      }
     } else if (m <= 4096) {
-      // Optimized for prefill: seq_len up to 4096 (m=4096 with topk=1)
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      }
     } else {
-      // Optimized for prefill: seq_len up to 8192 (m=8192 with topk=1)
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 7168 && k == 2048) {
@@ -127,21 +157,36 @@ void dispatch_w4a8_moe_mm_sm90(
     } else if (m <= 512) {
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
     } else if (m <= 4096) {
-      // Optimized for prefill: larger cluster for better throughput
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      }
     } else {
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 512 && k == 7168) {
     // group gemm 1 for tp
     if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
+      }
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
+      }
     } else if (m <= 256) {
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      }
     } else {
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
     }
@@ -152,29 +197,27 @@ void dispatch_w4a8_moe_mm_sm90(
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
     } else if (m <= 512) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      if (is_h20) {
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
+      } else {
+        INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      }
     } else {
       INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else {
     if (k % 512 == 0) {
-      // For large m (prefill), prefer larger cluster
       if (m <= 32) {
-        // Decode: target batch size (16-32) - use cluster size 1 for better latency
         INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
       } else if (m <= 1024) {
-        // Decode: large batch or small prefill
         INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
       } else {
-        // Prefill: large sequence length - prefer larger cluster
         INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
       }
     } else {
       if (m <= 32) {
-        // Decode: target batch size (16-32) - use larger tile for better throughput
         INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
       } else {
-        // Prefill: larger sequence length
         INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
       }
     }

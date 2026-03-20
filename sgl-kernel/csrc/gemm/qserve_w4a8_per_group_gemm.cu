@@ -35,6 +35,9 @@
 #define L2_CACHEHINT(size)
 #endif
 
+// H20 SM count for occupancy tuning
+#define H20_SM_COUNT 78
+
 #define KERNEL_LAUNCH_CODE                                                                                   \
   constexpr int NUM_WARPS = (CTA_M / WARP_M) * (CTA_N / WARP_N) * (CTA_K / WARP_K);                          \
   constexpr int SCALES_SMEM_SIZE = (G >= CTA_K) ? (CTA_N * STAGES * 2) : (CTA_N * (CTA_K / G) * STAGES * 2); \
@@ -745,7 +748,53 @@ void qserve_w4a8_per_group_gemm(
   auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
   auto stream = at::cuda::getCurrentCUDAStream(_in_feats.get_device());
   auto sm_version = getSMVersion();
-  if (sm_version >= 80) {
+  if (sm_version >= 90) {
+    // SM90 (Hopper / H20) optimized configurations:
+    // - Deeper pipelines (more STAGES) to leverage 228KB shared memory
+    // - H20's 4.0 TB/s HBM3 bandwidth benefits from aggressive prefetching
+    // - Thresholds adjusted for H20's 78 SMs
+    constexpr int G = 128;
+
+    if (num_out_feats > 128) {
+      constexpr int CTA_M = 128;
+      constexpr int CTA_N = 64;
+      constexpr int CTA_K = 64;
+      constexpr int WARP_M = 64;
+      constexpr int WARP_N = 32;
+      constexpr int WARP_K = 64;
+      constexpr int STAGES = 6;
+      KERNEL_LAUNCH_CODE
+    } else if (num_out_feats >= 64) {
+      if (num_in_channels <= 4096) {
+        constexpr int CTA_M = 64;
+        constexpr int CTA_N = 64;
+        constexpr int CTA_K = 64;
+        constexpr int WARP_M = 32;
+        constexpr int WARP_N = 32;
+        constexpr int WARP_K = 64;
+        constexpr int STAGES = 8;
+        KERNEL_LAUNCH_CODE
+      } else {
+        constexpr int CTA_M = 64;
+        constexpr int CTA_N = 64;
+        constexpr int CTA_K = 128;
+        constexpr int WARP_M = 32;
+        constexpr int WARP_N = 32;
+        constexpr int WARP_K = 64;
+        constexpr int STAGES = 6;
+        KERNEL_LAUNCH_CODE
+      }
+    } else {
+      constexpr int CTA_M = 32;
+      constexpr int CTA_N = 64;
+      constexpr int CTA_K = 128;
+      constexpr int WARP_M = 32;
+      constexpr int WARP_N = 32;
+      constexpr int WARP_K = 64;
+      constexpr int STAGES = 6;
+      KERNEL_LAUNCH_CODE
+    }
+  } else if (sm_version >= 80) {
     constexpr int G = 128;
 
     if (num_out_feats > 128) {
