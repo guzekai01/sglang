@@ -1105,6 +1105,28 @@ def compute_position(
     return positions, extend_start_loc
 
 
+def _is_valid_extend_start_loc(
+    extend_start_loc: Optional[torch.Tensor],
+    extend_seq_lens: torch.Tensor,
+) -> bool:
+    if (
+        extend_start_loc is None
+        or extend_start_loc.shape[0] != extend_seq_lens.shape[0]
+        or extend_start_loc.device != extend_seq_lens.device
+    ):
+        return False
+    if extend_seq_lens.numel() <= 1:
+        return True
+    # For exclusive offsets, adjacent deltas must match per-request lengths.
+    return bool(
+        torch.equal(
+            extend_start_loc[1:].to(torch.int64)
+            - extend_start_loc[:-1].to(torch.int64),
+            extend_seq_lens[:-1].to(torch.int64),
+        )
+    )
+
+
 def compute_position_triton(
     extend_prefix_lens: torch.Tensor,
     extend_seq_lens: torch.Tensor,
@@ -1115,11 +1137,7 @@ def compute_position_triton(
     batch_size = extend_seq_lens.shape[0]
     has_prefix = extend_prefix_lens.shape[0] == batch_size
 
-    if (
-        extend_start_loc is None
-        or extend_start_loc.shape[0] != batch_size
-        or extend_start_loc.device != extend_seq_lens.device
-    ):
+    if not _is_valid_extend_start_loc(extend_start_loc, extend_seq_lens):
         extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
 
     positions = torch.empty(
@@ -1178,11 +1196,7 @@ def compute_position_torch(
         ],
         axis=0,
     )
-    if (
-        extend_start_loc is None
-        or extend_start_loc.shape[0] != extend_seq_lens.shape[0]
-        or extend_start_loc.device != extend_seq_lens.device
-    ):
+    if not _is_valid_extend_start_loc(extend_start_loc, extend_seq_lens):
         extend_start_loc = compute_start_loc_from_lens(extend_seq_lens)
     return positions.to(torch.int64), extend_start_loc
 

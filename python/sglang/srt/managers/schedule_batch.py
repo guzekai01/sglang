@@ -1467,6 +1467,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         else:
             self.encoder_out_cache_loc = torch.cat(encoder_out_cache_loc)
 
+        # Encoder stripping mutates extend_lens, so refresh offsets accordingly.
+        self.extend_start_loc = compute_start_loc_from_lens(
+            self.extend_start_loc.new_tensor(self.extend_lens)
+        )
+
         assert (
             len(self.out_cache_loc) == self.extend_num_tokens
         ), f"Expected {len(self.out_cache_loc)}, got {self.extend_num_tokens}"
