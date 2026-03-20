@@ -121,17 +121,21 @@ __inline__ __device__ void ldmatrix_m8n8_x4_trans_b16(int8_t* shared_warp, int a
       : "r"(addr));
 }
 
-// function from lmdeploy
 __inline__ __device__ void cp_async_cg_A(uint32_t smem_int_ptr, const uint4* __restrict__ src, bool mask) {
   const int cp_size = 16;
-  asm volatile("{"
-                "  .reg .pred p;"
-                "  setp.ne.b32 p, %0, 0;"
+  asm volatile(
+      "{"
+      "  .reg .pred p;"
+      "  setp.ne.b32 p, %0, 0;"
+#if __CUDA_ARCH__ >= 900
+      "  @p cp.async.cg.shared.global.L2::256B [%1], [%2], %3;"
+#else
                 "  @p cp.async.cg.shared.global" L2_CACHEHINT(128) " [%1], [%2], %3;"
-                "}" ::"r"((int)mask),
-                "r"(smem_int_ptr),
-                "l"(src),
-                "n"(cp_size));
+#endif
+      "}" ::"r"((int)mask),
+      "r"(smem_int_ptr),
+      "l"(src),
+      "n"(cp_size));
 }
 
 __device__ __inline__ void mma_m16n8k32(void* C_warp, void* A_shared_warp, void* B_shared_warp) {
