@@ -23,6 +23,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_hip,
     _use_aiter,
     _use_aiter_gfx95,
+    zero_attn_tp_scatter_padding,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import BumpAllocator
@@ -393,12 +394,9 @@ class DeepseekMLAForwardMixin:
                 save_kv_cache=save_kv_cache,
                 **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
             )
-        # Same as forward_mha.forward_normal_core: with input_scattered, TP padding
-        # leaves trailing rows uninitialized; zero them before o_proj / comms.
-        if get_attn_tp_context().input_scattered:
-            n_valid = forward_batch.extend_num_tokens
-            if n_valid is not None and n_valid < attn_output.shape[0]:
-                attn_output[n_valid:] = 0
+        attn_output = zero_attn_tp_scatter_padding(
+            attn_output, forward_batch.extend_num_tokens
+        )
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
         if self.use_deep_gemm_bmm:

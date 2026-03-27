@@ -15,6 +15,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_hip,
     _is_npu,
     _use_aiter_gfx95,
+    zero_attn_tp_scatter_padding,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import BumpAllocator, get_bool_env_var, next_power_of_2
@@ -272,10 +273,9 @@ class DeepseekMHAForwardMixin:
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
-        if get_attn_tp_context().input_scattered:
-            n_valid = forward_batch.extend_num_tokens
-            if n_valid is not None and n_valid < attn_output.shape[0]:
-                attn_output[n_valid:] = 0
+        attn_output = zero_attn_tp_scatter_padding(
+            attn_output, forward_batch.extend_num_tokens
+        )
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
@@ -330,19 +330,9 @@ class DeepseekMHAForwardMixin:
                 forward_batch=forward_batch,
             )
 
-        # When input_scattered is enabled, prepare_attn_tp_scatter_input pads
-        # the token count to be divisible by TP world size. The attention backend
-        # (both ragged and paged paths) only processes the valid tokens governed
-        # by qo_indptr, leaving padding positions with uninitialized output from
-        # torch.empty. These garbage values propagate through AllReduce in
-        # prepare_mlp and corrupt valid tokens. With fp8 kv_cache, the GPU
-        # memory pool contains uint8 data that reinterprets as NaN/Inf,
-        # making this corruption catastrophic.
-        # Zero out padding positions to prevent contamination.
-        if get_attn_tp_context().input_scattered:
-            n_valid = forward_batch.extend_num_tokens
-            if n_valid is not None and n_valid < attn_output.shape[0]:
-                attn_output[n_valid:] = 0
+        attn_output = zero_attn_tp_scatter_padding(
+            attn_output, forward_batch.extend_num_tokens
+        )
 
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
