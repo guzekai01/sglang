@@ -393,6 +393,12 @@ class DeepseekMLAForwardMixin:
                 save_kv_cache=save_kv_cache,
                 **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
             )
+        # Same as forward_mha.forward_normal_core: with input_scattered, TP padding
+        # leaves trailing rows uninitialized; zero them before o_proj / comms.
+        if get_attn_tp_context().input_scattered:
+            n_valid = forward_batch.extend_num_tokens
+            if n_valid is not None and n_valid < attn_output.shape[0]:
+                attn_output[n_valid:] = 0
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
         if self.use_deep_gemm_bmm:
