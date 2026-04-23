@@ -1,11 +1,24 @@
 import itertools
+import sys
 
 import pytest
 import torch
 
 from sglang.jit_kernel.per_tensor_absmax_fp8 import per_tensor_absmax_fp8
+from sglang.test.ci.ci_register import register_cuda_ci
 
-FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+register_cuda_ci(est_time=10, suite="stage-b-kernel-unit-1-gpu-large")
+register_cuda_ci(est_time=60, suite="nightly-kernel-1-gpu", nightly=True)
+
+try:
+    from sglang.srt.utils import is_hip
+
+    _is_hip = is_hip()
+except ImportError:
+    _is_hip = False
+
+fp8_type_ = torch.float8_e4m3fnuz if _is_hip else torch.float8_e4m3fn
+FP8_MAX = torch.finfo(fp8_type_).max
 
 
 def reference_absmax_scale(x: torch.Tensor) -> torch.Tensor:
@@ -65,4 +78,4 @@ def test_absmax_large():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
+    sys.exit(pytest.main([__file__, "-v", "-s"]))
