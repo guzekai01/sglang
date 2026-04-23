@@ -10,6 +10,9 @@ from sglang.jit_kernel.benchmark.utils import (
     run_benchmark,
 )
 from sglang.jit_kernel.per_tensor_absmax_fp8 import per_tensor_absmax_fp8
+from sglang.test.ci.ci_register import register_cuda_ci
+
+register_cuda_ci(est_time=5, suite="stage-b-kernel-benchmark-1-gpu-large")
 
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 
