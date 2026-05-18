@@ -349,6 +349,25 @@ def run_one_shape(shape: Shape, run_marlin: bool):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-marlin", action="store_true", help="Skip Marlin path.")
+    parser.add_argument(
+        "--hidden", type=int, default=4096, help="Hidden dim (K). Default 4096."
+    )
+    parser.add_argument(
+        "--inter",
+        type=int,
+        default=2048,
+        help=(
+            "Intermediate dim per rank. For TP=N serving, pass 2048/N "
+            "(e.g. --inter 256 for TP=8). Default 2048 (single-GPU)."
+        ),
+    )
+    parser.add_argument(
+        "--num-experts",
+        type=int,
+        default=256,
+        help="Total experts per rank. With ep_size=1, same as global E.",
+    )
+    parser.add_argument("--top-k", type=int, default=6, help="Top-K experts per token.")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -357,8 +376,21 @@ def main():
     if cap[0] != 9:
         print(f"WARNING: device cap {cap} is not SM90; SM90-specific kernel may fail.")
 
+    body = dict(
+        hidden=args.hidden,
+        inter=args.inter,
+        num_experts=args.num_experts,
+        top_k=args.top_k,
+    )
+    shapes = [
+        Shape(tokens=M, **body) for M in [4, 16, 64, 256, 1024, 2048, 4096, 8192]
+    ]
     print(f"Device: {torch.cuda.get_device_name()} (cap {cap[0]}.{cap[1]})")
-    for shape in DEFAULT_SHAPES:
+    print(
+        f"Body: hidden={args.hidden} inter={args.inter} "
+        f"E={args.num_experts} topk={args.top_k}"
+    )
+    for shape in shapes:
         run_one_shape(shape, run_marlin=not args.no_marlin)
 
 

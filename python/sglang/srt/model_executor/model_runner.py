@@ -2372,9 +2372,91 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.forward_stream.wait_stream(torch.cuda.current_stream())
         with torch.get_device_module(self.device).stream(self.forward_stream):
             with torch.inference_mode(), autotune(True, cache=str(cache_path)):
+                # 1) decode / target-verify shape: M ≈ req_to_token_pool.size *
+                #    num_draft_tokens (e.g. 64 * 4 = 256 with EAGLE).
                 self._dummy_run(batch_size=self.req_to_token_pool.size)
+                # 2) prefill chunk shapes for flashinfer_mxfp4 — _dummy_run cannot
+                #    reach these M because req_to_token_pool.size << chunked_prefill_size.
+                #    Without this, prefill cutlass_fused_moe calls hit the autotune
+                #    cache miss path and fall back to default tactics.
+                if self.server_args.moe_runner_backend == "flashinfer_mxfp4":
+                    self._autotune_flashinfer_mxfp4_prefill_M([2048, 4096, 8192])
         torch.cuda.current_stream().wait_stream(self.forward_stream)
         logger.info("FlashInfer autotune completed.")
+
+    def _autotune_flashinfer_mxfp4_prefill_M(self, M_list):
+        """Prime flashinfer autotune cache at prefill chunk M values by directly
+        invoking cutlass_fused_moe with synthetic inputs. Mirrors the call site
+        in Mxfp4FlashinferCutlassMoEMethod.apply so the cached tactics match
+        what serving will use at inference time.
+
+        Must be called inside an active ``autotune(True)`` context.
+        """
+        from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+        from flashinfer.fused_moe.core import ActivationType
+
+        moe_layer = None
+        for module in self.model.modules():
+            qm = getattr(module, "quant_method", None)
+            if (
+                qm is not None
+                and type(qm).__name__ == "Mxfp4FlashinferCutlassMoEMethod"
+                and hasattr(module, "w13_weight")
+            ):
+                moe_layer = module
+                break
+        if moe_layer is None:
+            logger.warning(
+                "No flashinfer_mxfp4 MoE layer found; skipping prefill autotune"
+            )
+            return
+
+        qm = moe_layer.quant_method
+        hidden = self.model_config.hidden_size
+        num_experts = moe_layer.w13_weight.shape[0]
+        top_k = self.model_config.hf_config.num_experts_per_tok
+        device = moe_layer.w13_weight.device
+        dtype = torch.bfloat16
+
+        for M in M_list:
+            x = torch.randn(M, hidden, dtype=dtype, device=device)
+            topk_w = torch.rand(M, top_k, dtype=torch.float32, device=device)
+            topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
+            topk_i = torch.randint(
+                0, num_experts, (M, top_k), dtype=torch.int32, device=device
+            )
+            out = torch.empty(M, hidden, dtype=dtype, device=device)
+            try:
+                flashinfer_cutlass_fused_moe(
+                    input=x,
+                    token_selected_experts=topk_i,
+                    token_final_scales=topk_w,
+                    fc1_expert_weights=moe_layer.w13_weight,
+                    fc2_expert_weights=moe_layer.w2_weight,
+                    output_dtype=dtype,
+                    quant_scales=[
+                        moe_layer.w13_weight_scale_inv.view(torch.int32),
+                        moe_layer.w2_weight_scale_inv.view(torch.int32),
+                    ],
+                    fc1_expert_biases=None,
+                    fc2_expert_biases=None,
+                    swiglu_alpha=qm._swiglu_alpha_tensor,
+                    swiglu_beta=qm._swiglu_beta_tensor,
+                    swiglu_limit=qm._swiglu_limit_tensor,
+                    tp_size=moe_layer.moe_tp_size,
+                    tp_rank=moe_layer.moe_tp_rank,
+                    ep_size=moe_layer.moe_ep_size,
+                    ep_rank=moe_layer.moe_ep_rank,
+                    use_w4_group_scaling=True,
+                    activation_type=ActivationType.Swiglu,
+                    tune_max_num_tokens=M,
+                    output=out,
+                )
+                logger.info("FlashInfer mxfp4 autotuned M=%d", M)
+            except Exception as e:
+                logger.warning(
+                    "FlashInfer mxfp4 autotune at M=%d failed: %s", M, e
+                )
 
     def _flashinfer_autotune_cache_path(self) -> Path:
         import flashinfer
