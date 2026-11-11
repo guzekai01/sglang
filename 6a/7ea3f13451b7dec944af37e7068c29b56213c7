@@ -1,0 +1,19 @@
+test/registered/unit/layers/moe/test_humming_runner_gpu.py
+  s_09af67a488da23::t_93d48f98e496f8 44-61,70,96-97,238-239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6a7ea3f13451b7dec944af37e7068c29b56213c7",
+  "prompts": {},
+  "sessions": {
+    "s_09af67a488da23": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a531-da8a-73f2-94ae-49ab92e61ba8",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "zekai <zekai01@antgroup.com>"
+    }
+  }
+}
